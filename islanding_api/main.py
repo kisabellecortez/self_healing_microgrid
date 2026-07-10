@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from apscheduler.schedulers.background import BackgroundScheduler
 import subprocess
 import sys
+import os
+import joblib
+from load_data import load_models, load_params
+import load_data
 
 app = FastAPI()
 
@@ -12,16 +16,20 @@ def run_training_script():
         subprocess.run(
             [
                 sys.executable,
-                "retrain_isolation_forests.py"
-            ]
+                "isolation_forest_models_manager.py"
+            ],
+            check=True
         )
+
+        load_data.models = load_models()
 
     except subprocess.CalledProcessError as e:
         print("Training failed: ", e.stderr)
 
 @app.on_event("startup")
 def startup_event():
-    scheduler.start()
+    load_data.models = load_models()
+    load_data.load_metadata = load_params()
 
     scheduler.add_job(
         run_training_script,
@@ -36,7 +44,7 @@ def startup_event():
 
 @app.on_event("shutdown")
 def shutdown_event():
-    scheduler.shutdown()
+    scheduler.shutdown() 
 
 @app.get("/")
 def home():

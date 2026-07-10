@@ -4,6 +4,7 @@ from sklearn.ensemble import IsolationForest
 import joblib
 import os
 import numpy as np
+import load_data
 
 # isolation forest parameters
 N_ESTIMATORS = 200
@@ -61,9 +62,11 @@ def retrain_isolation_forests(load_id, rated_voltage, rated_current):
             rainfall
         ) = sample
         
-        power = sample.voltage * sample.current
-        voltage_deviation = sample.voltage - rated_voltage
-        current_deviation = sample.current - rated_current
+        ratings = load_data.load_metadata[load_id]
+
+        power = voltage * current
+        voltage_deviation = voltage - ratings["rated_voltage"]
+        current_deviation = current - ratings["rated_current"]
 
         training_dataset.append([
             power,
@@ -75,22 +78,22 @@ def retrain_isolation_forests(load_id, rated_voltage, rated_current):
             rainfall
         ])
 
-        new_model = IsolationForest(
-            n_estimators = N_ESTIMATORS,
-            contamination = CONTAMINATION,
-            random_state = RANDOM_STATE
-        )
+    new_model = IsolationForest(
+        n_estimators = N_ESTIMATORS,
+        contamination = CONTAMINATION,
+        random_state = RANDOM_STATE
+    )
 
-        new_model.fit(training_dataset)
+    new_model.fit(training_dataset)
 
-        os.makedirs("isolation_forest_models", exist_ok=True)
+    os.makedirs("isolation_forest_models", exist_ok=True)
 
-        joblib.dump(
-            new_model, 
-            f"isolation_forest_models/load_{load_id}.joblib"
-        )
+    joblib.dump(
+        new_model, 
+        f"isolation_forest_models/load_{load_id}.joblib"
+    )
 
-        return new_model
+    return new_model
 
 cur.execute(
     """
