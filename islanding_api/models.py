@@ -2,7 +2,7 @@ import enum
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -51,7 +51,7 @@ class FeatureReading(Base):
 
     __tablename__ = "feature_readings"
 
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     node_id: Mapped[str] = mapped_column(String, primary_key=True)
     voltage: Mapped[Optional[float]] = mapped_column(Float)
     current: Mapped[Optional[float]] = mapped_column(Float)
@@ -68,7 +68,7 @@ class AnomalyScore(Base):
     __tablename__ = "anomaly_scores"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     node_id: Mapped[Optional[str]] = mapped_column(String)
     anomaly_score: Mapped[float] = mapped_column(Float, nullable=False)
     model_version: Mapped[Optional[str]] = mapped_column(String)
@@ -80,7 +80,7 @@ class GridStateLog(Base):
     __tablename__ = "grid_states"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     state: Mapped[GridState] = mapped_column(grid_state_pg_enum, nullable=False)
     fault_probability: Mapped[Optional[float]] = mapped_column(Float)
     anomaly_score: Mapped[Optional[float]] = mapped_column(Float)
@@ -92,11 +92,13 @@ class Decision(Base):
     __tablename__ = "decisions"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     grid_state: Mapped[GridState] = mapped_column(grid_state_pg_enum, nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
     latency_ms: Mapped[Optional[float]] = mapped_column(Float)
     outcome: Mapped[Optional[str]] = mapped_column(String)
+    features: Mapped[Optional[dict]] = mapped_column(JSONB)
+    load_actions: Mapped[Optional[dict]] = mapped_column(JSONB)
 
 
 class BatteryStatus(Base):
@@ -104,7 +106,7 @@ class BatteryStatus(Base):
 
     __tablename__ = "battery_status"
 
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     battery_id: Mapped[str] = mapped_column(String, primary_key=True)
     soc: Mapped[float] = mapped_column(Float, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -115,7 +117,7 @@ class LoadStatus(Base):
 
     __tablename__ = "load_status"
 
-    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True)
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
     load_id: Mapped[str] = mapped_column(String, primary_key=True)
     load_type: Mapped[LoadType] = mapped_column(load_type_pg_enum, nullable=False)
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False)
