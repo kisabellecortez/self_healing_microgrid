@@ -1,15 +1,21 @@
-"""Decision-making layer (FS-19/FS-20/FS-21, NFS-9).
+"""Decision-making layer (FS-18/FS-19/FS-20, NFS-8).
 
 Per the design doc (3.7.2) and confirmed with the anomaly detection side:
-this layer also absorbs grid-classification duties (FS-16/17/18) - there's
+this layer also absorbs grid-classification duties (FS-15/16/17) - there's
 no separate classification module. One function classifies grid state,
-another maps state -> switching action; the doc's Figure Y pseudocode
-describes exactly this two-step shape and is mirrored here function-for-
-function so the doc stays an accurate description of the real code.
+another maps state -> switching action; the doc's Figure Y mirrors this
+two-step shape function-for-function so the doc stays an accurate
+description of the real code.
 
 Input contract (confirmed with anomaly detection):
     system_anomaly_score: float
     per load: anomaly_score (float), connected (0/1), critical (0/1)
+
+FS/NFS numbers below match the July 12 doc revision. FS-5/FS-9/FS-10 were
+rewritten in that revision (SOC-or-time staged critical shedding, critical
+loads no longer disconnect at islanding onset) - this file was rebuilt to
+match, not just relabeled. See the shedding section below for what
+actually changed and the one open question it depends on.
 """
 
 import os
@@ -36,14 +42,9 @@ class LoadSignal:
     anomaly_score: float
     connected: bool
     critical: bool
-    # Timestamp this load last went to connected=False. Needed for FS-10
-    # staggered timing - caller resolves this from load_status history.
-    # None -> unknown / never disconnected; reconnection isn't blocked on
-    # missing data (fail-open, see _reconnect_eligible).
-    disconnected_since: Optional[datetime] = None
 
 
-# ── FS-16/17/18: grid state classification ─────────────────────────────
+# ── FS-15/16/17: grid state classification ─────────────────────────────
 #
 # Auto-loads a trained Random Forest from MODEL_PATH if one exists;
 # otherwise falls back to the rule-based thresholds below (per the risk
@@ -103,9 +104,8 @@ def build_feature_vector(system_anomaly_score: float, loads: list[LoadSignal], s
     Deliberately excludes raw per-node voltage/current. Section 3.7.1
     already consumes raw voltage/current/power against node thresholds
     (isolation forest) and outputs an anomaly score - that's the whole
-    point of the two-layer split. This layer's input, per the confirmed
-    interface and the corrected 3.7.2 text, is anomaly scores plus
-    connection/criticality flags.
+    point of the two-layer split. This layer's input is anomaly scores
+    plus connection/criticality flags.
     """
     features = {"system_anomaly_score": system_anomaly_score, "soc": soc}
     for load in loads:
@@ -115,109 +115,137 @@ def build_feature_vector(system_anomaly_score: float, loads: list[LoadSignal], s
     return features
 
 
-# ── FS-10: staggered reconnection windows for the three critical loads ──
-# Not carried by the anomaly-detection interface (binary critical flag
-# only) - hardcoded here since it's fixed hardware/spec knowledge, not
-# something anomaly detection would ever send.
-CRITICAL_RECONNECT_WINDOWS_SEC = {
-    "critical_1": (0, 59),  # Fire and Life Safety
-    "critical_2": (60, 3540),  # Security, 1-59 min
-    "critical_3": (3600, 86400),  # Egress & Patient Care Lighting, 1-24 hr
-}
-
-
-def _reconnect_eligible(load: LoadSignal, now: datetime) -> bool:
-    if not load.critical:
-        return True  # FS-10 only defines windows for critical loads
-    window = CRITICAL_RECONNECT_WINDOWS_SEC.get(load.load_id)
-    if window is None or load.disconnected_since is None:
-        return True  # fail-open: unknown load id or no timestamp, don't block indefinitely
-    elapsed = (now - load.disconnected_since).total_seconds()
-    return elapsed >= window[0]
-
-
-def _target(load: LoadSignal, should_be_connected: bool, now: datetime) -> Action:
+def _target(load: LoadSignal, should_be_connected: bool) -> Action:
     if should_be_connected:
-        if load.connected:
-            return Action.HOLD
-        return Action.RECONNECT if _reconnect_eligible(load, now) else Action.HOLD
+        return Action.HOLD if load.connected else Action.RECONNECT
     return Action.SHED if load.connected else Action.HOLD
 
 
-# ── FS-19/FS-21: state -> action rule table (Figure Y in the design doc) ─
-# Each state's action is computed fresh from current load status, not
-# assumed prior state, since classify_grid_state() can jump straight from
-# any state to any other in one cycle (e.g. sudden catastrophic fault:
-# normal -> islanded with nothing in between).
+# ── FS-9: non-critical shedding, unchanged in the rewrite ──────────────
+# New FS-9 ties this to islanding specifically ("when islanding is
+# triggered"), but doing it proactively in CRITICAL/FAULT_IMMINENT too
+# doesn't violate that (it's a minimum, not a ceiling), and it's what 4.3
+# calls out as the "predictive, not reactive" novelty claim. Left as-is.
+
+def _reconnect_all(loads: list[LoadSignal]) -> dict[str, Action]:
+    return {l.load_id: _target(l, True) for l in loads}
 
 
-def _reconnect_all(loads: list[LoadSignal], now: datetime) -> dict[str, Action]:
-    return {l.load_id: _target(l, True, now) for l in loads}
+def _shed_non_critical(loads: list[LoadSignal]) -> dict[str, Action]:
+    return {l.load_id: _target(l, l.critical) for l in loads}
 
 
-def _shed_non_critical(loads: list[LoadSignal], now: datetime) -> dict[str, Action]:
-    # Criticals stay connected/reconnect; only non-criticals shed (FS-9).
-    return {l.load_id: _target(l, l.critical, now) for l in loads}
+# ── FS-5/FS-10: staged critical load shedding (REBUILT, not relabeled) ──
+#
+# Old model (previous doc revision): once islanded, all-or-nothing SOC
+# tiers - shed critical_2+3 together below 20%, shed everything below 10%.
+# Critical loads disconnected at islanding onset and reconnected on a
+# staggered timer.
+#
+# New model (this revision): critical loads stay connected at islanding
+# onset (FS-9) and shed individually, least-important-first, each gated by
+# its own SOC-or-elapsed-time trigger, whichever comes first (FS-5/FS-10).
+# Reconnection is no longer staggered - FS-10 now means something
+# different (shedding stages, not reconnect windows), and no other spec
+# defines reconnect timing, so reconnect_all() below is unconditional.
+#
+# OPEN QUESTION, RESOLVED as an implementation choice: FS-4 ties the 10%
+# SOC threshold to a BATTERY TRANSFER (Battery 1 -> Battery 2), not a load
+# shed, and FS-5 only defines shed thresholds for critical_2 and
+# critical_3. Section 3.2.2 says "Critical Load 1 remains connected until
+# the SOC shutdown threshold refined in FS-5 is reached" - but FS-5 never
+# actually defines one for critical_1. Resolved below: critical_1 sheds on
+# SOC alone, no time trigger, at the same 10%
+# threshold FS-4 already uses to justify the Battery 1 -> Battery 2
+# transfer ("discharging below 10% can cause irreversible capacity
+# degradation," 3.2.1). Rationale:
+#   - Reuses an SOC floor the doc already justifies, rather than inventing
+#     a new number with no grounding.
+#   - No time trigger: shedding Fire/Life Safety because a clock expired,
+#     independent of whether the battery is actually at risk, doesn't
+#     hold up the way it does for critical_2/3 (whose time triggers exist
+#     specifically to make the demo practical, not because time itself
+#     endangers anything). float("inf") disables the time condition
+#     without touching _should_shed's shared OR logic.
+#   - `soc` here is deliberately not battery-specific - it already means
+#     "whichever battery is currently active" for critical_2/3 (matching
+#     the Simulink model's Active_SOC), so this extends the same
+#     convention rather than introducing battery-tracking logic. In
+#     practice this means critical_1 only sheds once Battery 2 also hits
+#     10%, since Battery 1 transfers away at 10% before ever going lower.
+CRITICAL_SHED_TRIGGERS = {
+    "critical_3": {"soc_below": 0.20, "islanded_longer_than_sec": 59},         # 59 sec
+    "critical_2": {"soc_below": 0.15, "islanded_longer_than_sec": 59 * 60},    # 59 min
+    "critical_1": {"soc_below": 0.10, "islanded_longer_than_sec": float("inf")},  # SOC only, mirrors FS-4
+}
 
 
-def _shed_all(loads: list[LoadSignal]) -> dict[str, Action]:
-    return {l.load_id: (Action.SHED if l.connected else Action.HOLD) for l in loads}
+def _should_shed(load: LoadSignal, soc: float, time_islanded_sec: float) -> bool:
+    trigger = CRITICAL_SHED_TRIGGERS.get(load.load_id)
+    if trigger is None:
+        return False
+    return soc < trigger["soc_below"] or time_islanded_sec > trigger["islanded_longer_than_sec"]
 
 
-def _shed_critical_loads_2_and_3(loads: list[LoadSignal], now: datetime) -> dict[str, Action]:
-    def keep_connected(l: LoadSignal) -> bool:
-        return l.critical and l.load_id not in ("critical_2", "critical_3")
-
-    return {l.load_id: _target(l, keep_connected(l), now) for l in loads}
-
-
-# Islanded + SOC >= 20%: same outcome as "shed non-critical" (criticals up,
-# non-criticals down) - kept as a separate name for 1:1 traceability to
-# Figure Y in the doc, even though the logic is identical.
-_maintain_critical_loads = _shed_non_critical
+def _staged_critical_shedding(loads: list[LoadSignal], soc: float, time_islanded_sec: float) -> dict[str, Action]:
+    actions = {}
+    for load in loads:
+        if not load.critical:
+            actions[load.load_id] = _target(load, False)  # non-critical stays shed while islanded
+        else:
+            actions[load.load_id] = _target(load, not _should_shed(load, soc, time_islanded_sec))
+    return actions
 
 
 def map_state_to_action(
-    grid_state: GridState, soc: float, loads: list[LoadSignal], now: Optional[datetime] = None
+    grid_state: GridState, soc: float, loads: list[LoadSignal], time_islanded_sec: float = 0.0
 ) -> tuple[str, dict[str, Action]]:
     """Returns (branch_name, {load_id: Action}). branch_name matches the
     function names in Figure Y for direct doc <-> code traceability."""
-    now = now or datetime.now(timezone.utc)
-
     if grid_state in (GridState.NORMAL, GridState.WARNING):
-        return "reconnect_all", _reconnect_all(loads, now)
+        return "reconnect_all", _reconnect_all(loads)
     if grid_state in (GridState.CRITICAL, GridState.FAULT_IMMINENT):
-        return "shed_non_critical", _shed_non_critical(loads, now)
-
-    # grid_state == ISLANDED - FS-4/FS-5 SOC thresholds take priority
-    if soc < 0.10:
-        return "shed_all", _shed_all(loads)
-    if soc < 0.20:
-        return "shed_critical_loads_2_and_3", _shed_critical_loads_2_and_3(loads, now)
-    return "maintain_critical_loads", _maintain_critical_loads(loads, now)
+        return "shed_non_critical", _shed_non_critical(loads)
+    # grid_state == ISLANDED - FS-5/FS-10 staged shedding takes priority over the anomaly-driven state
+    return "staged_critical_shedding", _staged_critical_shedding(loads, soc, time_islanded_sec)
 
 
 def determine_action(
-    system_anomaly_score: float, loads: list[LoadSignal], soc: float, now: Optional[datetime] = None
+    system_anomaly_score: float, loads: list[LoadSignal], soc: float, time_islanded_sec: float = 0.0
 ) -> tuple[GridState, str, dict[str, Action], dict]:
     """Top-level entry point matching determine_action() in Figure Y.
     Returns (grid_state, branch_name, per_load_actions, features) - the
     caller logs all four to the decisions table (see log_decision below).
+
+    time_islanded_sec: seconds since the system last entered ISLANDED,
+    resolved via time_since_islanding_started() before calling this - kept
+    as a plain float here so this function stays pure/DB-free, same
+    reasoning as everything else in this module.
     """
-    now = now or datetime.now(timezone.utc)
     features = build_feature_vector(system_anomaly_score, loads, soc)
     grid_state = classify_grid_state(features)
-    branch, actions = map_state_to_action(grid_state, soc, loads, now)
+    branch, actions = map_state_to_action(grid_state, soc, loads, time_islanded_sec)
     return grid_state, branch, actions, features
 
 
-# ── FS-20: log every decision with the feature vector that produced it ──
+# ── FS-19: log every decision with the feature vector that produced it ──
 
 
 async def log_decision(db, *, grid_state: GridState, branch: str, actions: dict[str, Action],
                         features: dict, latency_ms: float, outcome: Optional[str] = None) -> None:
-    from models import Decision  # local import, only needed here
+    from models import Decision, GridStateLog  # local import, only needed here
 
+    # Also writes to grid_states, not just decisions. Previously nothing
+    # populated grid_states at all, which meant time_since_islanding_started()
+    # below had no history to query. fault_probability and anomaly_score are
+    # set to the same value deliberately - per Section 3.5, the anomaly score
+    # stands in for fault probability in the real system, there's no second
+    # independent signal to store.
+    db.add(GridStateLog(
+        state=grid_state,
+        fault_probability=features.get("system_anomaly_score"),
+        anomaly_score=features.get("system_anomaly_score"),
+    ))
     db.add(Decision(
         grid_state=grid_state,
         action=branch,
@@ -229,53 +257,39 @@ async def log_decision(db, *, grid_state: GridState, branch: str, actions: dict[
     await db.commit()
 
 
-# ── FS-10 support: resolving disconnected_since from load_status history ──
-#
-# LoadSignal.disconnected_since has to come from somewhere. Nothing before
-# this point populates it - callers were expected to resolve it themselves,
-# which meant the FS-10 staggered-timing path had only ever been exercised
-# against hand-built test data, never against real logged history. This
-# closes that gap.
+def build_load_signals(
+    anomaly_scores: dict[str, float], connected: dict[str, bool], critical: dict[str, bool]
+) -> list[LoadSignal]:
+    """Zips the raw interface data (per load_id) into LoadSignal objects
+    ready for determine_action(). No DB access needed - unlike the old
+    per-load reconnect-timing version, nothing here depends on history."""
+    return [
+        LoadSignal(load_id=lid, anomaly_score=anomaly_scores[lid], connected=connected[lid], critical=critical[lid])
+        for lid in connected
+    ]
 
 
-async def _last_disconnected_at(db, load_id: str) -> Optional[datetime]:
-    """Timestamp this load most recently transitioned to connected=False.
-    Returns None if the load is currently connected (nothing to resolve)."""
+# ── FS-5/FS-10 support: how long has the system been islanded? ─────────
+
+
+async def time_since_islanding_started(db) -> float:
+    """Seconds since the system most recently transitioned into ISLANDED.
+    Returns 0.0 if not currently islanded (nothing to measure) - callers
+    in a non-islanded state don't use this value anyway, since
+    map_state_to_action only consults it in the ISLANDED branch."""
     from sqlalchemy import text
 
     result = await db.execute(text("""
-        SELECT time FROM load_status
-        WHERE load_id = :load_id AND connected = false
+        SELECT time FROM grid_states
+        WHERE state = 'islanded'
           AND time > COALESCE(
-              (SELECT MAX(time) FROM load_status WHERE load_id = :load_id AND connected = true),
+              (SELECT MAX(time) FROM grid_states WHERE state != 'islanded'),
               '-infinity'
           )
         ORDER BY time ASC
         LIMIT 1
-    """), {"load_id": load_id})
+    """))
     row = result.first()
-    return row[0] if row else None
-
-
-async def resolve_load_signals(
-    db, anomaly_scores: dict[str, float], connected: dict[str, bool], critical: dict[str, bool]
-) -> list[LoadSignal]:
-    """Builds LoadSignal objects ready for determine_action(), resolving
-    disconnected_since from load_status for every currently-disconnected
-    load. Currently-connected loads get disconnected_since=None.
-
-    Usage:
-        loads = await resolve_load_signals(db, anomaly_scores, connected, critical)
-        grid_state, branch, actions, features = determine_action(system_score, loads, soc)
-    """
-    signals = []
-    for load_id, is_connected in connected.items():
-        disconnected_since = None if is_connected else await _last_disconnected_at(db, load_id)
-        signals.append(LoadSignal(
-            load_id=load_id,
-            anomaly_score=anomaly_scores[load_id],
-            connected=is_connected,
-            critical=critical[load_id],
-            disconnected_since=disconnected_since,
-        ))
-    return signals
+    if row is None:
+        return 0.0
+    return (datetime.now(timezone.utc) - row[0]).total_seconds()

@@ -1,4 +1,4 @@
-"""Trains the FS-16/17/18 grid-state Random Forest and saves it to
+"""Trains the FS-15/16/17 grid-state Random Forest and saves it to
 MODEL_PATH (see decision_layer.py) - once that file exists,
 classify_grid_state() picks it up automatically, no code changes needed.
 
@@ -40,12 +40,12 @@ FEATURE_NAMES = sorted(
     ).keys()
 )
 
-# NFS-7 (essential): >=90% recall specifically on critical/fault_imminent -
+# NFS-6 (essential): >=90% recall specifically on critical/fault_imminent -
 # per the design doc, these gate whether the decision layer is trusted to
-# drive real hardware. NFS-8 (non-essential): >=85% overall accuracy.
-NFS7_TARGET_RECALL = 0.90
-NFS7_STATES = ["critical", "fault_imminent"]
-NFS8_TARGET_ACCURACY = 0.85
+# drive real hardware. NFS-7 (non-essential): >=85% overall accuracy.
+NFS6_TARGET_RECALL = 0.90
+NFS6_STATES = ["critical", "fault_imminent"]
+NFS7_TARGET_ACCURACY = 0.85
 
 
 def make_synthetic_data(n=2000, seed=0):
@@ -94,17 +94,17 @@ def train(df: pd.DataFrame):
     y_pred = model.predict(X_val)
     print(classification_report(y_val, y_pred))
 
-    recalls = recall_score(y_val, y_pred, labels=NFS7_STATES, average=None, zero_division=0)
+    recalls = recall_score(y_val, y_pred, labels=NFS6_STATES, average=None, zero_division=0)
     accuracy = model.score(X_val, y_val)
 
-    print(f"Overall accuracy: {accuracy:.3f} (NFS-8 target: >= {NFS8_TARGET_ACCURACY})")
-    for state, recall in zip(NFS7_STATES, recalls):
-        flag = "OK" if recall >= NFS7_TARGET_RECALL else "BELOW TARGET"
-        print(f"Recall on '{state}': {recall:.3f} (NFS-7 target: >= {NFS7_TARGET_RECALL}) [{flag}]")
+    print(f"Overall accuracy: {accuracy:.3f} (NFS-7 target: >= {NFS7_TARGET_ACCURACY})")
+    for state, recall in zip(NFS6_STATES, recalls):
+        flag = "OK" if recall >= NFS6_TARGET_RECALL else "BELOW TARGET"
+        print(f"Recall on '{state}': {recall:.3f} (NFS-6 target: >= {NFS6_TARGET_RECALL}) [{flag}]")
 
-    if any(r < NFS7_TARGET_RECALL for r in recalls):
+    if any(r < NFS6_TARGET_RECALL for r in recalls):
         print(
-            "\nNFS-7 not met - per the risk assessment, this model will NOT be saved/"
+            "\nNFS-6 not met - per the risk assessment, this model will NOT be saved/"
             "deployed. Keeping the rule-based fallback active. Retrain with more data "
             "or better features, or re-run with --force to override (not recommended - "
             "this gates whether the decision layer is trusted to drive Critical Load 1)."

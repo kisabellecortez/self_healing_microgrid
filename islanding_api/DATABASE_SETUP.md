@@ -4,6 +4,17 @@ Full explanation of the Postgres/TimescaleDB layer added to `islanding_api`.
 Keep this in the repo - it's the reference doc for anyone (including future
 you) touching the database.
 
+---
+
+In `main.py`, you'd import like:
+
+```python
+from database import get_db
+from models import Decision, GridState, GridStateLog, AnomalyScore, FeatureReading, BatteryStatus, LoadStatus
+```
+
+---
+
 ## Running it
 
 ```bash
@@ -94,28 +105,8 @@ Per-load connection state (`connected` bool) and `priority_level`, matching
 the staggered reconnection timing in FS-10 and the independent per-load
 switching in FS-22.
 
-No `demand_forecast` table
----
-
-## Two mistakes fixed in `models.py`
-
-Both were caught by actually running inserts against a live Postgres
-instance while building this, not just eyeballing the code.
-
-**1. Enum values.** Python's `str, enum.Enum` classes look like they'd map
-cleanly onto a Postgres enum, but SQLAlchemy's default behavior persists the
-enum *member name* (`"WARNING"`), not its *value* (`"warning"`). The
-Postgres enum types only define lowercase values, so without intervention
-every insert would fail. Fix: `values_callable=lambda obj: [e.value for e in obj]`
-on the `SAEnum(...)` definitions. If you add a new enum-backed column, copy
-that pattern.
-
-**2. Timezones.** Every `time` column is `TIMESTAMPTZ` (timezone-aware). If
-a `Mapped[datetime]` column is declared without `DateTime(timezone=True)`,
-SQLAlchemy infers a naive `TIMESTAMP` type, and asyncpg then throws a
-`DataError` the moment you try to insert a timezone-aware Python
-`datetime.now(timezone.utc)`. Fix: the module-level `TZDateTime =
-DateTime(timezone=True)` used on every time column in `models.py`.
+No `demand_forecast` table - per your call with your teammate, anomaly
+detection is doing that job instead.
 
 ---
 
@@ -137,15 +128,19 @@ import time
 from fastapi import FastAPI, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from decision_layer import LoadSignal, determine_action, log_decision
+from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
 
 app = FastAPI()
 
 @app.post("/decide")
-async def decide(system_anomaly_score: float, soc: float, loads: list[LoadSignal],
+async def decide(system_anomaly_score: float, soc: float,
+                  anomaly_scores: dict[str, float], connected: dict[str, bool], critical: dict[str, bool],
                   db: AsyncSession = Depends(get_db)):
+    loads = build_load_signals(anomaly_scores, connected, critical)
+    time_islanded_sec = await time_since_islanding_started(db)
+
     start = time.perf_counter()
-    grid_state, branch, actions, features = determine_action(system_anomaly_score, loads, soc)
+    grid_state, branch, actions, features = determine_action(system_anomaly_score, loads, soc, time_islanded_sec)
     latency_ms = (time.perf_counter() - start) * 1000
 
     await log_decision(db, grid_state=grid_state, branch=branch, actions=actions,
@@ -153,9 +148,10 @@ async def decide(system_anomaly_score: float, soc: float, loads: list[LoadSignal
     return {"grid_state": grid_state, "actions": {k: v.value for k, v in actions.items()}}
 ```
 
-`loads` here needs `disconnected_since` resolved from `load_status` history
-first (see the decision layer section below) - this example assumes the
-caller already did that.
+`build_load_signals` is a plain sync function now, no DB access needed -
+it just zips the three interface dicts into `LoadSignal` objects.
+`time_since_islanding_started` is the one that hits the DB, resolving how
+long the system has been islanded from `grid_states` history (see below).
 
 ---
 
@@ -181,21 +177,30 @@ docker exec -i aegis_postgres psql -U aegis -d aegis < init-db/002_decisions_fea
 
 ## Decision layer (`decision_layer.py`)
 
-FS-19/20/21 plus the grid-classification duties (FS-16/17/18) it absorbed,
+FS-18/19/20 plus the grid-classification duties (FS-15/16/17) it absorbed,
 per 3.7.2 and confirmed with anomaly detection - there's no separate
 classification module. Implements Figure Y from the doc function-for-
-function; heavily commented in the file itself. Two things worth knowing
-up front:
+function; heavily commented in the file itself. This module was rebuilt,
+not just relabeled, when FS-5/FS-9/FS-10 changed to the SOC-or-time staged
+shedding model - critical loads no longer disconnect at islanding onset,
+and shed individually instead of in bulk SOC tiers. Three things worth
+knowing up front:
 
 - `classify_grid_state()` auto-loads a trained model from
   `models/rf_grid_state.joblib` if one exists, otherwise falls back to
   rule-based thresholds. Nothing else in the file needs to change when a
   real model lands - just drop the file in place.
-- FS-10 reconnection timing needs to know how long a load's been
-  disconnected. `LoadSignal.disconnected_since` has to be resolved from
-  `load_status` history by whatever calls this module - the functions in
-  `decision_layer.py` are pure and don't touch the DB themselves, except
-  `log_decision()`.
+- Reconnection is unconditional now, not staggered - no spec defines a
+  reconnect delay anymore (that concept moved to shedding, per the
+  FS-10 rewrite). `reconnect_all()` just reconnects everything the moment
+  grid state allows it.
+- `log_decision()` writes to *both* `decisions` and `grid_states` now.
+  The second one didn't used to get written to at all, which meant
+  `time_since_islanding_started()` had no history to query. Don't remove
+  that write, `time_since_islanding_started()` depends on it.
+- The rest of the module (`classify_grid_state`, `map_state_to_action`,
+  `determine_action`, `build_load_signals`) is pure and doesn't touch the
+  DB. Only `time_since_islanding_started()` and `log_decision()` do.
 
 ---
 
@@ -212,4 +217,3 @@ python train_decision_model.py path/to/simulink_export.csv
 Won't save/deploy a model that misses the NFS-7 recall target (90% on
 `critical`/`fault_imminent`) unless you pass `--force` - intentional, not a
 bug, given this model ends up deciding whether Critical Load 1 stays powered.
-
