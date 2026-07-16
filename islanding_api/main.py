@@ -1,35 +1,44 @@
-from fastapi import FastAPI
-from apscheduler.schedulers.background import BackgroundScheduler
 import subprocess
 import sys
-import os
-import joblib
-from load_data import load_models, load_params
+import time
+from datetime import datetime
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import Depends, FastAPI
+from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 import load_data
+from anomaly_detection import process_json
+from database import AsyncSessionLocal, get_db
+from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
+from models import AnomalyScore
 
 app = FastAPI()
 
 scheduler = BackgroundScheduler()
 
+# Fixed: this used to subprocess "isolation_forest_models_manager.py", a
+# filename that doesn't exist anywhere in the repo (the actual script is
+# retrain_isolation_forests.py) - the nightly 3am retraining job has been
+# silently failing every run since it was added.
+TRAIN_SCRIPT = "retrain_isolation_forests.py"
+
+
 def run_training_script():
     try:
-        subprocess.run(
-            [
-                sys.executable,
-                "isolation_forest_models_manager.py"
-            ],
-            check=True
-        )
-
-        load_data.models = load_models()
-
+        subprocess.run([sys.executable, TRAIN_SCRIPT], check=True)
+        load_data.models = load_data.load_models()
     except subprocess.CalledProcessError as e:
         print("Training failed: ", e.stderr)
 
+
 @app.on_event("startup")
-def startup_event():
-    load_data.models = load_models()
-    load_data.load_metadata = load_params()
+async def startup_event():
+    load_data.models = load_data.load_models()
+    async with AsyncSessionLocal() as db:
+        load_data.load_metadata = await load_data.load_params(db)
 
     scheduler.add_job(
         run_training_script,
@@ -44,7 +53,7 @@ def startup_event():
 
 @app.on_event("shutdown")
 def shutdown_event():
-    scheduler.shutdown() 
+    scheduler.shutdown()
 
 @app.get("/")
 def home():
@@ -54,6 +63,129 @@ def home():
 def data():
     return {"message": "Database data insertion."}
 
-@app.get("/api/islanding")
-def islanding():
-    return  {"message": "ML Pipeline"}
+
+# ── FS-13/14/15/17/18/19: the actual connection between 3.7.1 and 3.7.2 ────
+#
+# Previously this was a GET stub returning a placeholder message - nothing
+# in the repo called process_json() (anomaly_detection.py) or
+# determine_action()/log_decision() (decision_layer.py) together. This
+# endpoint is the missing bridge: one embedded-system JSON payload in
+# (Figure 6, Section 3.6) drives both layers and returns a switching action.
+
+
+class WeatherPayload(BaseModel):
+    temperature: float
+    humidity: float
+    rainfall: float
+    windspeed: float
+
+
+class LoadPayload(BaseModel):
+    load_id: int
+    voltage: float
+    current: float
+    power: float
+    state: int  # 0 = disconnected, 1 = connected (Figure 6)
+
+
+class SensorPayload(BaseModel):
+    timestamp: datetime
+    weather: WeatherPayload
+    loads: list[LoadPayload]
+
+
+def normalize_anomaly_score(raw_score: float) -> float:
+    """Maps an IsolationForest decision_function value (roughly centered on
+    0, negative = more anomalous, not formally bounded to a fixed range)
+    onto the ~0-1 "badness" scale decision_layer.py's rule-based fallback
+    thresholds assume (_STATE_THRESHOLDS: 0.2/0.4/0.6/0.8, higher = worse).
+
+    This is a placeholder linear mapping, not a calibrated one.
+    decision_layer.py's thresholds were written against the Simulink
+    fault-probability scale (Section 3.5) which is bounded [0, 1] by
+    construction; nothing has yet verified that raw isolation-forest scores
+    on real electrical data land in comparable bins. Revisit once real
+    training data lets you check the actual score distribution and
+    recalibrate this mapping (or replace it with one fit to real data) -
+    see NEXT_STEPS.md.
+    """
+    return min(1.0, max(0.0, 0.5 - raw_score))
+
+
+async def get_current_soc(db: AsyncSession) -> float:
+    """Most recent SOC from whichever battery is currently active (FS-4/5).
+
+    Defaults to 1.0 (full charge) if battery_status has no rows yet. The
+    Figure 6 JSON payload this endpoint receives doesn't carry SOC at all -
+    battery telemetry needs its own ingestion path before this default
+    matters in practice. See NEXT_STEPS.md.
+    """
+    result = await db.execute(text(
+        "SELECT soc FROM battery_status WHERE active = true ORDER BY time DESC LIMIT 1"
+    ))
+    row = result.first()
+    return row[0] if row is not None else 1.0
+
+
+@app.post("/api/islanding")
+async def islanding(payload: SensorPayload, db: AsyncSession = Depends(get_db)):
+    data = payload.model_dump()
+    raw_system_score, scores_predictions = process_json(data)
+
+    # FS-13/14: persist anomaly scores. Previously nothing wrote to this
+    # table even though models.AnomalyScore/init-db's anomaly_scores table
+    # both already existed for exactly this purpose.
+    for load_id, values in scores_predictions.items():
+        meta = load_data.load_metadata.get(load_id)
+        node_id = meta["name"] if meta else str(load_id)
+        db.add(AnomalyScore(node_id=node_id, anomaly_score=values["score"]))
+    if raw_system_score is not None:
+        db.add(AnomalyScore(node_id=None, anomaly_score=raw_system_score))
+    await db.commit()
+
+    if raw_system_score is None:
+        # Every load reported state == 0 (all disconnected) - nothing to
+        # classify or act on this cycle.
+        return {"grid_state": None, "actions": {}, "detail": "no connected loads reporting"}
+
+    system_anomaly_score = normalize_anomaly_score(raw_system_score)
+
+    # Bridge anomaly_detection.py's int load_id (Figure 6) to
+    # decision_layer.py's string load names (load_metadata.name), and its
+    # critical/connected flags (load_metadata.load_type / JSON `state`).
+    anomaly_scores: dict[str, float] = {}
+    connected: dict[str, bool] = {}
+    critical: dict[str, bool] = {}
+    for load in payload.loads:
+        meta = load_data.load_metadata.get(load.load_id)
+        if meta is None:
+            continue  # no load_metadata row for this id - can't map to a decision-layer load name
+        name = meta["name"]
+        connected[name] = bool(load.state)
+        critical[name] = meta["critical"]
+        per_load = scores_predictions.get(load.load_id)
+        # Disconnected loads are never scored (anomaly_detection.py skips
+        # state == 0), so they get a neutral 0.0 rather than a KeyError -
+        # build_load_signals requires every connected-dict key to have a
+        # matching anomaly_scores entry.
+        anomaly_scores[name] = normalize_anomaly_score(per_load["score"]) if per_load else 0.0
+
+    loads = build_load_signals(anomaly_scores, connected, critical)
+    soc = await get_current_soc(db)
+    time_islanded_sec = await time_since_islanding_started(db)
+
+    start = time.perf_counter()
+    grid_state, branch, actions, features = determine_action(
+        system_anomaly_score, loads, soc, time_islanded_sec
+    )
+    latency_ms = (time.perf_counter() - start) * 1000
+
+    await log_decision(db, grid_state=grid_state, branch=branch, actions=actions,
+                        features=features, latency_ms=latency_ms)
+
+    return {
+        "grid_state": grid_state.value,
+        "branch": branch,
+        "actions": {k: v.value for k, v in actions.items()},
+        "system_anomaly_score": system_anomaly_score,
+    }

@@ -108,6 +108,19 @@ switching in FS-22.
 No `demand_forecast` table - per your call with your teammate, anomaly
 detection is doing that job instead.
 
+### `load_metadata` - Section 3.4, feeds both 3.7.1 and 3.7.2 (added in `003_load_metadata.sql`)
+Static per-load reference data, seeded with the 5 prototype loads. This
+table is what actually connects the two ML layers: `anomaly_detection.py`
+needs `rated_voltage`/`rated_current` per load to compute its feature
+vector, and `decision_layer.py` needs a `critical` flag plus a stable
+string name (`critical_1`, `noncritical_1`, ...) - `load_id` here is the
+integer id the embedded system uses in its JSON payload (Figure 6); `name`
+is the string id `decision_layer.py`/`CRITICAL_SHED_TRIGGERS` expect. Before
+this table existed, `load_data.py` queried a `load_metadata`
+table/`load_data` table that was never defined, and there was no mapping at
+all between the JSON payload's numeric ids and decision_layer.py's string
+ids - see `NEXT_STEPS.md` for what else that gap was hiding.
+
 ---
 
 ## Schema source of truth = the SQL file, not the ORM
@@ -120,38 +133,36 @@ inserting against tables that already exist.
 
 ---
 
-## Example: running a decision cycle from a route
+## The decision cycle route: `POST /api/islanding` in `main.py`
+
+This used to be a hypothetical example route (`/decide`, shown below in
+earlier revisions of this doc) - it's now the real thing, and it's also
+the actual connection point between 3.7.1 and 3.7.2:
 
 ```python
-# main.py
-import time
-from fastapi import FastAPI, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_db
-from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
-
-app = FastAPI()
-
-@app.post("/decide")
-async def decide(system_anomaly_score: float, soc: float,
-                  anomaly_scores: dict[str, float], connected: dict[str, bool], critical: dict[str, bool],
-                  db: AsyncSession = Depends(get_db)):
+@app.post("/api/islanding")
+async def islanding(payload: SensorPayload, db: AsyncSession = Depends(get_db)):
+    data = payload.model_dump()
+    raw_system_score, scores_predictions = process_json(data)      # 3.7.1
+    # ...persist AnomalyScore rows, map int load_id -> decision_layer
+    # string names via load_metadata, normalize the score...
     loads = build_load_signals(anomaly_scores, connected, critical)
-    time_islanded_sec = await time_since_islanding_started(db)
-
-    start = time.perf_counter()
-    grid_state, branch, actions, features = determine_action(system_anomaly_score, loads, soc, time_islanded_sec)
-    latency_ms = (time.perf_counter() - start) * 1000
-
+    grid_state, branch, actions, features = determine_action(       # 3.7.2
+        system_anomaly_score, loads, soc, time_islanded_sec
+    )
     await log_decision(db, grid_state=grid_state, branch=branch, actions=actions,
                         features=features, latency_ms=latency_ms)
-    return {"grid_state": grid_state, "actions": {k: v.value for k, v in actions.items()}}
+    return {"grid_state": grid_state.value, "actions": {...}}
 ```
 
-`build_load_signals` is a plain sync function now, no DB access needed -
-it just zips the three interface dicts into `LoadSignal` objects.
+`build_load_signals` is a plain sync function, no DB access needed - it
+just zips three interface dicts into `LoadSignal` objects.
 `time_since_islanding_started` is the one that hits the DB, resolving how
 long the system has been islanded from `grid_states` history (see below).
+See `NEXT_STEPS.md` for the score-scale normalization this route does and
+why it's a placeholder pending real training data, and for where SOC
+currently comes from (`battery_status`, defaulted to 1.0 if empty - not
+part of the Figure 6 JSON payload).
 
 ---
 

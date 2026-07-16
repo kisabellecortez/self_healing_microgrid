@@ -6,3 +6,10 @@ python-dotenv
 scikit-learn
 joblib
 pandas
+apscheduler
+pydantic
+
+# testing
+pytest
+pytest-asyncio
+httpx2  # required by starlette's TestClient, used in tests/test_main_integration.py

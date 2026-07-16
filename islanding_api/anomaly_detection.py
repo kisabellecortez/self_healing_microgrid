@@ -19,7 +19,12 @@ def process_json(data):
         if state == 0:
             continue
 
-        ratings = load_data.load_metadata[load_id]
+        # Skip an unrecognized load_id (e.g. hardware reports an id that
+        # hasn't been seeded into load_metadata yet) instead of crashing the
+        # whole request with a KeyError over one bad/unexpected reading.
+        ratings = load_data.load_metadata.get(load_id)
+        if ratings is None:
+            continue
 
         power = voltage * current
         voltage_deviation = voltage - ratings["rated_voltage"]
@@ -60,6 +65,13 @@ def system_score_calc(scores_predictions):
         values["score"]
         for values in scores_predictions.values()
     ]
+
+    # All loads can be disconnected (every load's state == 0 in the JSON
+    # payload), in which case scores_predictions is empty and there is no
+    # electrical behavior to score. None signals "no signal" to the caller
+    # rather than raising ZeroDivisionError or claiming a fake score of 0.0.
+    if not scores:
+        return None
 
     system_anomaly_score = (1 / len(scores)) * sum(scores)
 
