@@ -49,22 +49,28 @@ def load_models(model_dir: str = MODEL_DIR) -> dict[int, object]:
 
 
 async def load_params(db) -> dict[int, dict]:
-    """Loads per-load rated_voltage/rated_current/critical/name from the
-    load_metadata table into a {load_id: dict} lookup, keyed the same way the
-    embedded system's JSON payload keys loads (Figure 6, Section 3.6).
+    """Loads per-load voltage_rating/current_rating/critical/name from the
+    node_data table (init-db/004_node_data.sql) into a {load_id: dict}
+    lookup, keyed the same way the embedded system's JSON payload keys loads
+    (Figure 6, Section 3.6).
+
+    Returned dict keys are unchanged from before node_data replaced
+    load_metadata (still "rated_voltage"/"rated_current") - only the SQL
+    source renamed, not this function's contract, so anomaly_detection.py
+    didn't need to change.
     """
     global load_metadata
     load_metadata = {}
 
     result = await db.execute(text("""
-        SELECT load_id, name, rated_voltage, rated_current, load_type
-        FROM load_metadata
+        SELECT load_id, name, voltage_rating, current_rating, load_type
+        FROM node_data
     """))
-    for load_id, name, rated_voltage, rated_current, load_type in result.all():
+    for load_id, name, voltage_rating, current_rating, load_type in result.all():
         load_metadata[load_id] = {
             "name": name,
-            "rated_voltage": rated_voltage,
-            "rated_current": rated_current,
+            "rated_voltage": voltage_rating,
+            "rated_current": current_rating,
             "critical": load_type == "critical",
         }
 

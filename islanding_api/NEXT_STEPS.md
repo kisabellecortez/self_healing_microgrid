@@ -1,21 +1,66 @@
 # Integration status, testing, and next steps
 
 Written while connecting the anomaly detection layer (3.7.1, teammate) to
-the decision layer (3.7.2, Devrim) for the first time. Covers what was
-broken, what got fixed, the new test suite, and what's still blocked on real
-training data. Read this before touching `anomaly_detection.py`,
-`load_data.py`, `retrain_isolation_forests.py`, or `main.py`'s
-`/api/islanding` route.
+the decision layer (3.7.2, Devrim) for the first time, then updated when
+`node_data`/`historic_grid_data` were added. Covers what was broken, what
+got fixed, the test suite, and what's still blocked on real training data.
+Read this before touching `anomaly_detection.py`, `load_data.py`,
+`retrain_isolation_forests.py`, or `main.py`'s `/api/islanding` route.
+
+## Update: `node_data` + `historic_grid_data` added
+
+The anomaly-detection side proposed two new tables (screenshot: `Table 1.
+historic_grid_data`, `Table 2. node_data`). One design decision worth
+flagging back to her:
+
+- **`node_data` merged into the existing `load_metadata` table** rather than
+  being added alongside it - her proposal (load_id, priority_level,
+  voltage_rating, current_rating, power_rating) covered the same 5 rows
+  `load_metadata` already did, just under different column names and
+  missing the `name`/`load_type` columns 3.7.2 depends on. Two tables
+  claiming to be the source of truth for the same ratings would drift out
+  of sync eventually, so `init-db/004_node_data.sql` renames
+  `load_metadata` to `node_data`, adopts her column names, and keeps `name`
+  (decision_layer.py's string ids) and `load_type` (the critical flag)
+  alongside them. `init-db/003_load_metadata.sql` is left in place but
+  marked superseded, not deleted, in case it was already applied somewhere.
+- **`historic_grid_data` added as proposed** (`init-db/005_historic_grid_data.sql`),
+  with one naming change (`time` not `timestamp`, matching every other
+  hypertable in this schema) and a FK to `node_data(load_id)`. This is the
+  table `retrain_isolation_forests.py::fetch_training_samples()` was
+  previously blocked on (see "Resolved" below) - it now has a real source.
+  `main.py`'s `/api/islanding` writes one row per recognized load per
+  request, alongside the `anomaly_scores` write it already did.
+- **Open question for the anomaly-detection side**: her `historic_grid_data.state`
+  column can only represent connected/disconnected (that's the only sense
+  of "state" defined anywhere - the JSON payload's per-load `state` field).
+  But Section 3.7.1's retraining description filters on "connected **and**
+  fault status is false," and a load can be connected while actively
+  faulting - that's the whole point of anomaly detection. A single `state`
+  column can't carry both. `fetch_training_samples()` currently resolves
+  this by additionally excluding samples recorded while `grid_states` was
+  `critical`/`fault_imminent`/`islanded` at that moment (a `LEFT JOIN
+  LATERAL` finding the most recent grid state at-or-before each sample's
+  time - see the function's docstring for why a plain `NOT IN` isn't
+  enough). **Worth a quick confirm that this matches her intent** before
+  relying on it - it's a reasonable reading of the doc, not something she
+  explicitly signed off on.
+- This query (the `LATERAL` join) hasn't been run against real Postgres yet
+  - Docker wasn't available in this environment. Run `smoke_test.py`-style
+  verification against a live DB before trusting it: seed a few
+  `historic_grid_data`/`grid_states` rows spanning a fault window and
+  confirm `fetch_training_samples()` excludes the right ones.
 
 ## TL;DR
 
-Before this pass, the app could not start (`import main` raised
+Before the first pass, the app could not start (`import main` raised
 `NameError` inside `load_data.py`), and even if it could, nothing anywhere
 called both ML layers together - `main.py`'s `/api/islanding` was a GET
-stub returning a placeholder string. All of that's fixed and covered by 46
-new pytest tests (`tests/`, no database required). `smoke_test.py` (does
-need Docker/Postgres) still passes for the parts it covers and hasn't been
-changed.
+stub returning a placeholder string. All of that's fixed and covered by 51
+pytest tests (`tests/`, no database required). `smoke_test.py` (does need
+Docker/Postgres) still passes for the parts it covers and hasn't been
+changed. Since then, `node_data`/`historic_grid_data` were added per the
+anomaly-detection side's proposed schema - see the "Update" section above.
 
 ## What was broken (found while wiring the two layers together)
 
@@ -64,8 +109,9 @@ changed.
     shadowing the imported `load_data` module, so
     `load_data.load_metadata[load_id]` raised `AttributeError` on every call
     inside the retrain loop; and queried `historic_grid_data`/`load_data`
-    tables that don't exist. Fixed the first two; the third is a real open
-    question, see below.
+    tables that didn't exist yet. All three fixed now that `node_data` and
+    `historic_grid_data` exist (see "Update" at the top) -
+    `fetch_training_samples()` is a real query, not a placeholder.
 11. **Missing dependencies.** `apscheduler` (used by `main.py`) and
     `psycopg2` (used by the two files above) were imported but never in
     `requirements.txt`, so a clean `pip install -r requirements.txt` still
@@ -87,9 +133,9 @@ changed.
   when nothing is connected; `process_json` skips unrecognized `load_id`s
   instead of raising.
 - `retrain_isolation_forests.py`: fixed the connection and the
-  `load_data`-shadowing bug; the historic-data query now raises a clear
-  `NotImplementedError` naming the missing table rather than an opaque
-  Postgres "relation does not exist" error.
+  `load_data`-shadowing bug; `fetch_training_samples()` now runs a real
+  query against `historic_grid_data` (see "Update" at the top) instead of
+  raising `NotImplementedError`.
 - `requirements.txt` now lists everything actually imported
   (`apscheduler`, `pydantic`) plus the new test dependencies (`pytest`,
   `pytest-asyncio`, `httpx2`).
@@ -110,7 +156,7 @@ probably a 3.7.1/3.7.2 joint decision, not one layer's alone.
 
 ## Testing added
 
-`tests/` (pytest, run with `pytest` from `islanding_api/`) - 46 tests, no
+`tests/` (pytest, run with `pytest` from `islanding_api/`) - 51 tests, no
 database required:
 
 - `test_decision_layer.py` - every rule-based threshold boundary (all 5
@@ -127,8 +173,12 @@ database required:
   int-`load_id`-to-string-name mapping (bug #3 above), anomaly-score
   persistence, the all-disconnected short-circuit, and an unrecognized
   `load_id` in the payload not crashing the request.
-- `test_load_data.py`, `test_retrain_isolation_forests.py` - the pieces of
-  each that don't depend on the still-missing historic-data source.
+- `test_load_data.py` - `node_data` row mapping, model-loading edge cases.
+- `test_retrain_isolation_forests.py` - `train_one`'s model fitting, and
+  that `fetch_node_data`/`fetch_training_samples` issue the right
+  tables/bindparams/bad-state list against a fake DB. Can't verify the
+  `LATERAL` join's actual behavior without real Postgres - see the "Update"
+  section at the top.
 
 This suite is meant to run in CI/pre-commit on every change to either ML
 layer or `main.py`'s `/api/islanding` route. `smoke_test.py` is unchanged
@@ -145,27 +195,19 @@ the decision-layer-to-Postgres path well.
   of that file. Run `python train_decision_model.py path\to\export.csv`
   once it exists; it won't save/deploy a model below the NFS-6 recall
   target without `--force`.
-- **`retrain_isolation_forests.py`** (per-load Isolation Forests, 3.7.1):
-  blocked on more than just data volume - `fetch_training_samples()` raises
-  `NotImplementedError` because there's no schema-backed source for "the
-  previous day's confirmed-normal samples" yet. The design doc's retraining
-  description (Section 3.7.1: "load state indicates connected and fault
-  status is false") implies joining `feature_readings` (has `voltage`,
-  `current`, `environment` JSONB) against `load_status` (connected) and
-  something indicating fault status - but there's no boolean fault column
-  in the current schema, and `environment` is JSONB rather than flat
-  temperature/humidity/windspeed/rainfall columns. **This needs a decision
-  with the team, not a guess**: either add a `historic_grid_data` view/table
-  that flattens what's needed out of the existing hypertables, or change
-  what `feature_readings` stores. Whoever picks this up should start from
-  `fetch_training_samples()`'s docstring in `retrain_isolation_forests.py`.
-- **Rated current placeholders.** `init-db/003_load_metadata.sql` seeds
-  `rated_current` with order-of-magnitude placeholders for everything except
-  Critical Load 2 (derived directly from the doc's stated 11W/12V solenoid
-  rating). Replace the FIT0441 motor and LED module entries with real
-  datasheet or bench-measured values before training on real data - the
-  anomaly detection feature vector (`current_deviation`) depends on them
-  directly.
+- **`retrain_isolation_forests.py`** (per-load Isolation Forests, 3.7.1): no
+  longer blocked on a missing table (see "Update" at the top), but still
+  blocked on there being enough real `historic_grid_data` history to train
+  on - `retrain_all()` currently just skips a load with zero
+  confirmed-normal samples rather than erroring, so the nightly job is safe
+  to run before real data accumulates, it just won't do anything yet.
+- **Rated current placeholders.** `init-db/004_node_data.sql` seeds
+  `current_rating` with order-of-magnitude placeholders for everything
+  except Critical Load 2 (derived directly from the doc's stated 11W/12V
+  solenoid rating). Replace the FIT0441 motor and LED module entries with
+  real datasheet or bench-measured values before training on real data -
+  the anomaly detection feature vector (`current_deviation`) depends on
+  them directly, and now so does `historic_grid_data`'s precomputed copy.
 - **SOC ingestion.** `main.py::get_current_soc()` reads the most recent
   active row from `battery_status`, defaulting to `1.0` if that table is
   empty - which it will be, since nothing currently writes to it and the

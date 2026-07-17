@@ -57,6 +57,28 @@ def test_process_json_builds_correct_feature_vector(monkeypatch):
     assert (temperature, humidity, windspeed, rainfall) == (28.4, 65, 12.5, 0.0)
 
 
+def test_process_json_exposes_power_and_deviations_for_historic_logging(monkeypatch):
+    # main.py's historic_grid_data writes (Section 3.7.1 retraining source)
+    # need these alongside score/prediction - they were computed internally
+    # already (for the model's feature_vector) but not returned before.
+    model = _FakeIsolationForest(score=0.1, prediction=1)
+    _install(monkeypatch, {1: model}, {1: {"rated_voltage": 12.0, "rated_current": 0.3, "critical": True}})
+
+    data = {
+        "weather": {"temperature": 20, "humidity": 50, "rainfall": 0, "windspeed": 5},
+        "loads": [{"load_id": 1, "voltage": 12.5, "current": 0.35, "power": 4.375, "state": 1}],
+    }
+    _, scores_predictions = process_json(data)
+
+    entry = scores_predictions[1]
+    assert entry["power"] == 12.5 * 0.35
+    assert entry["voltage_deviation"] == 12.5 - 12.0
+    assert abs(entry["current_deviation"] - (0.35 - 0.3)) < 1e-9
+    # Unchanged keys still present alongside the new ones.
+    assert entry["score"] == 0.1
+    assert entry["prediction"] == 1
+
+
 def test_process_json_skips_disconnected_loads(monkeypatch):
     connected_model = _FakeIsolationForest(score=0.1, prediction=1)
     disconnected_model = _FakeIsolationForest(score=-0.9, prediction=-1)

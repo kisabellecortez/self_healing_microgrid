@@ -46,6 +46,24 @@ load_type_pg_enum = SAEnum(
 )
 
 
+class NodeData(Base):
+    """Section 3.4: static per-load reference data, shared by 3.7.1
+    (voltage_rating/current_rating/power_rating) and 3.7.2 (name, load_type).
+    Supersedes load_metadata from init-db/003_load_metadata.sql - see
+    init-db/004_node_data.sql for why the two tables were merged instead of
+    coexisting."""
+
+    __tablename__ = "node_data"
+
+    load_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    load_type: Mapped[LoadType] = mapped_column(load_type_pg_enum, nullable=False)
+    voltage_rating: Mapped[float] = mapped_column(Float, nullable=False)
+    current_rating: Mapped[float] = mapped_column(Float, nullable=False)
+    power_rating: Mapped[float] = mapped_column(Float, nullable=False)
+    priority_level: Mapped[Optional[int]] = mapped_column(Integer)
+
+
 class FeatureReading(Base):
     """FS-6/7/8/11/12: electrical features streamed from the edge MCU."""
 
@@ -72,6 +90,30 @@ class AnomalyScore(Base):
     node_id: Mapped[Optional[str]] = mapped_column(String)
     anomaly_score: Mapped[float] = mapped_column(Float, nullable=False)
     model_version: Mapped[Optional[str]] = mapped_column(String)
+
+
+class HistoricGridData(Base):
+    """Section 3.7.1 retraining source (init-db/005_historic_grid_data.sql).
+    One row per load per /api/islanding request - what
+    retrain_isolation_forests.fetch_training_samples() reads from. Distinct
+    from FeatureReading: flattened weather columns instead of JSONB, plus
+    precomputed deviations, because retraining filters/aggregates this
+    directly rather than unpacking JSONB per row."""
+
+    __tablename__ = "historic_grid_data"
+
+    time: Mapped[datetime] = mapped_column(TZDateTime, primary_key=True, server_default=func.now())
+    load_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    voltage: Mapped[float] = mapped_column(Float, nullable=False)
+    current: Mapped[float] = mapped_column(Float, nullable=False)
+    power: Mapped[Optional[float]] = mapped_column(Float)
+    voltage_deviation: Mapped[Optional[float]] = mapped_column(Float)
+    current_deviation: Mapped[Optional[float]] = mapped_column(Float)
+    temperature: Mapped[float] = mapped_column(Float, nullable=False)
+    humidity: Mapped[float] = mapped_column(Float, nullable=False)
+    wind_speed: Mapped[float] = mapped_column(Float, nullable=False)
+    rainfall: Mapped[float] = mapped_column(Float, nullable=False)
+    state: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
 class GridStateLog(Base):

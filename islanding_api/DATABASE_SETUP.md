@@ -108,18 +108,41 @@ switching in FS-22.
 No `demand_forecast` table - per your call with your teammate, anomaly
 detection is doing that job instead.
 
-### `load_metadata` - Section 3.4, feeds both 3.7.1 and 3.7.2 (added in `003_load_metadata.sql`)
+### `node_data` - Section 3.4, feeds both 3.7.1 and 3.7.2 (added in `004_node_data.sql`, supersedes `load_metadata`/`003_load_metadata.sql`)
 Static per-load reference data, seeded with the 5 prototype loads. This
 table is what actually connects the two ML layers: `anomaly_detection.py`
-needs `rated_voltage`/`rated_current` per load to compute its feature
-vector, and `decision_layer.py` needs a `critical` flag plus a stable
-string name (`critical_1`, `noncritical_1`, ...) - `load_id` here is the
-integer id the embedded system uses in its JSON payload (Figure 6); `name`
-is the string id `decision_layer.py`/`CRITICAL_SHED_TRIGGERS` expect. Before
-this table existed, `load_data.py` queried a `load_metadata`
-table/`load_data` table that was never defined, and there was no mapping at
-all between the JSON payload's numeric ids and decision_layer.py's string
-ids - see `NEXT_STEPS.md` for what else that gap was hiding.
+needs `voltage_rating`/`current_rating` per load to compute its feature
+vector, and `decision_layer.py` needs a `load_type` (critical/non_critical)
+flag plus a stable string name (`critical_1`, `noncritical_1`, ...) -
+`load_id` here is the integer id the embedded system uses in its JSON
+payload (Figure 6); `name` is the string id
+`decision_layer.py`/`CRITICAL_SHED_TRIGGERS` expect. `power_rating` is
+nameplate rated power, not the instantaneous computed `power` column on
+`historic_grid_data` below - don't confuse the two. Originally proposed by
+the anomaly-detection side as `node_data` independent of the `load_metadata`
+table this repo already had for the same 5 rows; `004_node_data.sql` merges
+them into one table rather than keeping two overlapping sources of truth -
+see `NEXT_STEPS.md`.
+
+### `historic_grid_data` - Section 3.7.1 retraining source (added in `005_historic_grid_data.sql`)
+One row per load per `/api/islanding` request, written alongside
+`anomaly_scores`. Purpose-built for `retrain_isolation_forests.py` -
+flattened weather columns (not JSONB, unlike `feature_readings`) and
+precomputed `power`/`voltage_deviation`/`current_deviation` so the
+retraining query doesn't need to join `node_data` and recompute per row (it
+still does, at train time, against *current* ratings rather than trusting
+these - see the file's docstring). `state` is connected/disconnected only,
+matching the JSON payload's per-load `state` field - **not** the grid fault
+state. `load_id` has a FK to `node_data(load_id)`, which is why
+`main.py`'s endpoint must skip logging for any load_id with no `node_data`
+row, the same guard it already needed for the name mapping.
+
+Distinct from `feature_readings`: that table is the generic FS-11 raw
+ingestion log for any node (JSONB environment, includes grid-wide
+`frequency`/`soc` that don't belong on a per-load training row);
+`historic_grid_data` is specifically shaped for 3.7.1's retraining query.
+Both get written on every `/api/islanding` call - not a duplicate source of
+truth, since they serve different consumers with different query needs.
 
 ---
 

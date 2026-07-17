@@ -44,7 +44,14 @@ def process_json(data):
 
         scores_predictions[load_id] = {
             "score": score,
-            "prediction": prediction
+            "prediction": prediction,
+            # Added for historic_grid_data logging (main.py) - power/
+            # voltage_deviation/current_deviation were already computed
+            # above for the model's feature_vector, just not returned
+            # before. Purely additive: score/prediction are unchanged.
+            "power": power,
+            "voltage_deviation": voltage_deviation,
+            "current_deviation": current_deviation,
         }
 
     system_anomaly_score = system_score_calc(scores_predictions)

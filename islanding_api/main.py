@@ -13,7 +13,7 @@ import load_data
 from anomaly_detection import process_json
 from database import AsyncSessionLocal, get_db
 from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
-from models import AnomalyScore
+from models import AnomalyScore, HistoricGridData
 
 app = FastAPI()
 
@@ -132,13 +132,51 @@ async def islanding(payload: SensorPayload, db: AsyncSession = Depends(get_db)):
     data = payload.model_dump()
     raw_system_score, scores_predictions = process_json(data)
 
-    # FS-13/14: persist anomaly scores. Previously nothing wrote to this
-    # table even though models.AnomalyScore/init-db's anomaly_scores table
-    # both already existed for exactly this purpose.
-    for load_id, values in scores_predictions.items():
-        meta = load_data.load_metadata.get(load_id)
-        node_id = meta["name"] if meta else str(load_id)
-        db.add(AnomalyScore(node_id=node_id, anomaly_score=values["score"]))
+    # One pass over the payload's loads does three things per recognized
+    # load_id: (1) logs it to historic_grid_data (3.7.1 retraining source,
+    # init-db/005_historic_grid_data.sql) regardless of connection state,
+    # (2) persists its anomaly score (FS-13/14) if it was connected/scored,
+    # (3) builds the connected/critical/anomaly_scores maps decision_layer.py
+    # needs. A single guard - skip load_ids with no node_data row - covers
+    # all three, since node_data.load_id is a FK target for
+    # historic_grid_data and the only source of the string name
+    # decision_layer.py and AnomalyScore.node_id both key on.
+    anomaly_scores: dict[str, float] = {}
+    connected: dict[str, bool] = {}
+    critical: dict[str, bool] = {}
+    for load in payload.loads:
+        meta = load_data.load_metadata.get(load.load_id)
+        if meta is None:
+            continue  # no node_data row for this id - can't log or map it
+        name = meta["name"]
+        per_load = scores_predictions.get(load.load_id)  # None if disconnected/unscored
+
+        db.add(HistoricGridData(
+            load_id=load.load_id,
+            voltage=load.voltage,
+            current=load.current,
+            power=per_load["power"] if per_load else None,
+            voltage_deviation=per_load["voltage_deviation"] if per_load else None,
+            current_deviation=per_load["current_deviation"] if per_load else None,
+            temperature=payload.weather.temperature,
+            humidity=payload.weather.humidity,
+            wind_speed=payload.weather.windspeed,
+            rainfall=payload.weather.rainfall,
+            state=bool(load.state),
+        ))
+
+        connected[name] = bool(load.state)
+        critical[name] = meta["critical"]
+        if per_load:
+            db.add(AnomalyScore(node_id=name, anomaly_score=per_load["score"]))
+            anomaly_scores[name] = normalize_anomaly_score(per_load["score"])
+        else:
+            # Disconnected loads are never scored (anomaly_detection.py
+            # skips state == 0), so they get a neutral 0.0 rather than a
+            # KeyError - build_load_signals requires every connected-dict
+            # key to have a matching anomaly_scores entry.
+            anomaly_scores[name] = 0.0
+
     if raw_system_score is not None:
         db.add(AnomalyScore(node_id=None, anomaly_score=raw_system_score))
     await db.commit()
@@ -149,27 +187,6 @@ async def islanding(payload: SensorPayload, db: AsyncSession = Depends(get_db)):
         return {"grid_state": None, "actions": {}, "detail": "no connected loads reporting"}
 
     system_anomaly_score = normalize_anomaly_score(raw_system_score)
-
-    # Bridge anomaly_detection.py's int load_id (Figure 6) to
-    # decision_layer.py's string load names (load_metadata.name), and its
-    # critical/connected flags (load_metadata.load_type / JSON `state`).
-    anomaly_scores: dict[str, float] = {}
-    connected: dict[str, bool] = {}
-    critical: dict[str, bool] = {}
-    for load in payload.loads:
-        meta = load_data.load_metadata.get(load.load_id)
-        if meta is None:
-            continue  # no load_metadata row for this id - can't map to a decision-layer load name
-        name = meta["name"]
-        connected[name] = bool(load.state)
-        critical[name] = meta["critical"]
-        per_load = scores_predictions.get(load.load_id)
-        # Disconnected loads are never scored (anomaly_detection.py skips
-        # state == 0), so they get a neutral 0.0 rather than a KeyError -
-        # build_load_signals requires every connected-dict key to have a
-        # matching anomaly_scores entry.
-        anomaly_scores[name] = normalize_anomaly_score(per_load["score"]) if per_load else 0.0
-
     loads = build_load_signals(anomaly_scores, connected, critical)
     soc = await get_current_soc(db)
     time_islanded_sec = await time_since_islanding_started(db)

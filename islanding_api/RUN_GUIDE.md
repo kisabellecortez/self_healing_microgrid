@@ -22,11 +22,16 @@ Later runs just start the existing containers - fast.
 
 Only needed once per new `.sql` file added to `init-db/` after your first
 `docker compose up -d` (init scripts only auto-run against an empty volume).
-Currently that's `002_decisions_features.sql` and `003_load_metadata.sql`:
+Run these **in order**. `003_load_metadata.sql` is superseded by
+`004_node_data.sql` and only needs applying if this database was already
+running before 004 existed - `004` handles both cases (fresh DB, or
+migrating an already-applied `003`) on its own, so skip straight to it on a
+clean checkout:
 
 ```powershell
 Get-Content init-db\002_decisions_features.sql | docker exec -i aegis_postgres psql -U aegis -d aegis
-Get-Content init-db\003_load_metadata.sql | docker exec -i aegis_postgres psql -U aegis -d aegis
+Get-Content init-db\004_node_data.sql | docker exec -i aegis_postgres psql -U aegis -d aegis
+Get-Content init-db\005_historic_grid_data.sql | docker exec -i aegis_postgres psql -U aegis -d aegis
 ```
 
 If that errors, use this instead (copies the file in directly, sidesteps
@@ -35,22 +40,27 @@ PowerShell stdin quirks entirely):
 ```powershell
 docker cp init-db\002_decisions_features.sql aegis_postgres:/tmp/002.sql
 docker exec -it aegis_postgres psql -U aegis -d aegis -f /tmp/002.sql
-docker cp init-db\003_load_metadata.sql aegis_postgres:/tmp/003.sql
-docker exec -it aegis_postgres psql -U aegis -d aegis -f /tmp/003.sql
+docker cp init-db\004_node_data.sql aegis_postgres:/tmp/004.sql
+docker exec -it aegis_postgres psql -U aegis -d aegis -f /tmp/004.sql
+docker cp init-db\005_historic_grid_data.sql aegis_postgres:/tmp/005.sql
+docker exec -it aegis_postgres psql -U aegis -d aegis -f /tmp/005.sql
 ```
 
 ## 4. Verify the schema
 
 ```powershell
 docker exec -it aegis_postgres psql -U aegis -d aegis -c "\d decisions"
-docker exec -it aegis_postgres psql -U aegis -d aegis -c "SELECT * FROM load_metadata"
+docker exec -it aegis_postgres psql -U aegis -d aegis -c "SELECT * FROM node_data"
+docker exec -it aegis_postgres psql -U aegis -d aegis -c "\d historic_grid_data"
 ```
 
 `decisions` should show 8 columns including `features` and `load_actions`.
-`load_metadata` should show 5 seeded rows (`critical_1`..`critical_3`,
-`noncritical_1`..`noncritical_2`). If either is missing, step 3 didn't run
-yet - anomaly_detection.py and main.py's `/api/islanding` endpoint both
-depend on `load_metadata` existing.
+`node_data` should show 5 seeded rows (`critical_1`..`critical_3`,
+`noncritical_1`..`noncritical_2`). `historic_grid_data` should exist as a
+hypertable with a FK on `load_id` to `node_data`. If any is missing, step 3
+didn't run yet - anomaly_detection.py and main.py's `/api/islanding`
+endpoint both depend on `node_data`; `retrain_isolation_forests.py` depends
+on `historic_grid_data` too.
 
 ## 5. Install Python dependencies
 

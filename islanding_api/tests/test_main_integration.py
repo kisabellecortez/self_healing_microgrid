@@ -138,6 +138,38 @@ def test_islanding_endpoint_disconnected_load_gets_neutral_score_not_keyerror(cl
     assert "noncritical_1" in resp.json()["actions"]
 
 
+def test_islanding_endpoint_persists_historic_grid_data_for_every_recognized_load(client):
+    test_client, fake_db = client
+    test_client.post("/api/islanding", json=_payload())
+
+    from models import HistoricGridData
+    rows = {row.load_id: row for row in fake_db.added if isinstance(row, HistoricGridData)}
+    # One row per load in the payload (Section 3.7.1 retraining source),
+    # keyed by the numeric load_id - unlike AnomalyScore, this table is
+    # indexed by node_data.load_id directly (it's the FK target), not name.
+    assert set(rows) == {1, 2, 3, 4, 5}
+    assert rows[1].state is True
+    assert rows[1].power == pytest.approx(12.0 * 0.3)
+    assert rows[1].voltage_deviation == pytest.approx(12.0 - 12.0)
+
+
+def test_islanding_endpoint_historic_grid_data_nulls_deviation_for_disconnected_load(client):
+    test_client, fake_db = client
+    load_states = {i: 1 for i in range(1, 6)}
+    load_states[4] = 0  # noncritical_1 disconnected
+    test_client.post("/api/islanding", json=_payload(load_states))
+
+    from models import HistoricGridData
+    rows = {row.load_id: row for row in fake_db.added if isinstance(row, HistoricGridData)}
+    # Still logged (connection history matters even when disconnected), but
+    # deviation from a rating is meaningless with no current flowing - NULL,
+    # not a deviation computed against a raw 0.
+    assert rows[4].state is False
+    assert rows[4].power is None
+    assert rows[4].voltage_deviation is None
+    assert rows[4].current_deviation is None
+
+
 def test_islanding_endpoint_all_loads_disconnected_short_circuits(client):
     test_client, fake_db = client
     resp = test_client.post("/api/islanding", json=_payload({i: 0 for i in range(1, 6)}))
@@ -156,13 +188,19 @@ def test_islanding_endpoint_unknown_load_id_is_ignored_not_crashed(client, monke
     # A load_id with no load_metadata row (e.g. hardware sends an id nobody
     # seeded yet) must not crash the whole request.
     monkeypatch.setattr(load_data, "models", {**{i: _FakeIsolationForest(0.3) for i in range(1, 6)}, 99: _FakeIsolationForest(0.1)})
-    test_client, _ = client
+    test_client, fake_db = client
     payload = _payload()
     payload["loads"].append({"load_id": 99, "voltage": 12.0, "current": 0.1, "power": 1.2, "state": 1})
 
     resp = test_client.post("/api/islanding", json=payload)
     assert resp.status_code == 200
     assert "99" not in resp.json()["actions"]
+
+    # Also must not attempt a historic_grid_data row for load_id 99 - that
+    # column has a hard FK to node_data(load_id) (init-db/005), so trying
+    # would fail the whole request's commit(), not just skip harmlessly.
+    from models import HistoricGridData
+    assert not any(isinstance(row, HistoricGridData) and row.load_id == 99 for row in fake_db.added)
 
 
 def test_normalize_anomaly_score_bounds():

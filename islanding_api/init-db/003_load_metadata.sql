@@ -1,3 +1,9 @@
+-- SUPERSEDED by 004_node_data.sql, which renames this table to node_data
+-- (matching the schema your teammate proposed) and adds power_rating.
+-- Left in place, unedited, since this may already have been applied to a
+-- running database - 004 migrates it forward rather than replacing it here.
+-- Do not apply this file to a fresh database on its own; run through 004.
+--
 -- Per-load reference data, needed by both ML layers (3.7.1 and 3.7.2) and
 -- previously missing from the schema entirely:
 --   - anomaly_detection.py needs rated_voltage/rated_current per load to
