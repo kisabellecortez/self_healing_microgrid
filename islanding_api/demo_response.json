@@ -1,0 +1,12 @@
+{
+  "grid_state": "critical",
+  "branch": "shed_non_critical",
+  "actions": {
+    "critical_1": "hold",
+    "critical_2": "hold",
+    "critical_3": "hold",
+    "noncritical_1": "hold",
+    "noncritical_2": "shed"
+  },
+  "system_anomaly_score": 0.5728187925198243
+}

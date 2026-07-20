@@ -4,6 +4,18 @@ staged critical-shedding rewrite), logging to Postgres, and NFS-8 latency.
 Re-run this any time after touching the schema, models.py, or
 decision_layer.py to catch breakage early.
 
+Deliberately forces the rule-based fallback (see decision_layer module
+patch below `SCENARIOS`) rather than whatever real trained model happens to
+be sitting in models/rf_grid_state.joblib on the machine this runs on -
+otherwise this test's result depends on incidental local state (has
+anyone trained a real model recently?) instead of being a deterministic
+regression check of decision_layer.py's own documented threshold behavior.
+Confirmed 2026-07-20: once a real model exists, these hand-constructed
+scenarios (uniform 0.2 per-load score regardless of system_anomaly_score)
+get classified differently by the RF than by the thresholds, because real
+training data doesn't have that system/per-load mismatch - not a bug, just
+proof this test needs to pin down which classifier it's exercising.
+
 Usage:
     python smoke_test.py
 
@@ -17,11 +29,17 @@ from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
 
+import decision_layer
 from database import AsyncSessionLocal
 from decision_layer import (
     Action, GridState, build_load_signals, determine_action, log_decision, time_since_islanding_started,
 )
 from models import Decision, GridStateLog
+
+# Force the rule-based fallback for the whole run, regardless of whether
+# models/rf_grid_state.joblib exists - see module docstring.
+decision_layer._rf_bundle = None
+decision_layer._rf_load_attempted = True
 
 SCENARIOS = [
     # (label, system_anomaly_score, soc, expect_grid_state)
