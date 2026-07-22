@@ -14,6 +14,8 @@ from anomaly_detection import process_json
 from database import AsyncSessionLocal, get_db
 from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
 from models import AnomalyScore, HistoricGridData
+import requests
+import os
 
 app = FastAPI()
 
@@ -92,6 +94,36 @@ class SensorPayload(BaseModel):
     timestamp: datetime
     weather: WeatherPayload
     loads: list[LoadPayload]
+
+LAT = 43.47061
+LON = -80.54132
+
+@app.get("/api/weather")
+def get_weather():
+    url = (
+        "https://api.openweathermap.org/data/2.5/weather"
+        f"?lat={LAT}"
+        f"&lon={LON}"
+        f"&appid={os.getenv("OPENWEATHER_API_KEY")}"
+        "&units=metric"
+    )
+
+    response = requests.get(url)
+    response.raise_for_status()
+    data = response.json()
+
+    temperature = data["main"]["temp"]
+    humidity = data["main"]["humidity"]
+    wind_speed = data["wind"]["speed"]
+
+    rainfall = data.get("rain", {}).get("1h", 0)
+
+    return {
+        "temperature": temperature,
+        "humidity": humidity,
+        "windspeed": wind_speed,
+        "rainfall": rainfall
+    }
 
 
 def normalize_anomaly_score(raw_score: float) -> float:
@@ -206,3 +238,204 @@ async def islanding(payload: SensorPayload, db: AsyncSession = Depends(get_db)):
         "actions": {k: v.value for k, v in actions.items()},
         "system_anomaly_score": system_anomaly_score,
     }
+
+
+@app.post("dashboard_functions/status")
+async def get_current_status(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT state FROM grid_states
+        WHERE timestamp = (
+            SELECT MAX(timestamp) 
+            FROM grid_states
+        );
+    """)
+
+    result = await db.excute(query)
+
+    state = result.scalar()
+
+    return {
+        "current_state": state
+    }
+
+
+@app.post("dashboard_functions/power")
+async def get_current_power(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT SUM(power) AS total_power
+        FROM historic_grid_data
+        WHERE timestamp = (
+            SELECT MAX(timestamp) 
+            FROM historic_grid_data
+        );
+    """)
+
+    result = await db.execute(query)
+
+    total_power = result.scalar()
+
+    return {
+        "current_power": total_power
+    }
+
+
+@app.post("dashboard_functions/energy")
+async def get_current_energy(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT SUM(power)/(3600*1000) AS total_energy
+        FROM historic_grid_data
+        WHERE timestamp >= CURRENT_DATE;
+    """)
+
+    result = await db.execute(query)
+
+    total_energy = result.scalar()
+
+    return {
+        "current_energy": total_energy
+    }
+
+
+@app.post("dashboard_functions/loads_data")
+async def get_loads_data(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT 
+            node_data.name,
+            latest_status.connected,
+            latest_history.power
+        FROM node_data
+        LEFT JOIN (
+            SELECT DISTINCT ON (load_id)
+                load_id,
+                connected
+            FROM load_status
+            ORDER BY load_id, timestamp DESC
+        ) AS latest_status
+        ON noded_data.load_id = latest_status.load_id
+        LEFT JOIN (
+            SELECT DISTINCT ON (load_id)
+                load_id, 
+                power
+            FROM historical_grid_data
+            ORDER BY load_id, timestamp DESC
+        ) AS latest_history
+        ON node_data.load_id = latest_history.load_id;
+    """)
+
+    result = await db.execute(query)
+
+    loads_data = result.all()
+
+    loads_json = [
+        {
+            "name": row.name,
+            "connected": row.connected,
+            "power": row.power
+        }
+
+        for row in loads_data
+    ]
+
+    return loads_json
+
+
+@app.post("dashboard_functions/loads_metadata")
+async def get_loads_metadata(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT load_id, name
+        FROM load_data;
+    """)
+
+    result = await db.execute(query)
+
+    loads_data = result.all()
+
+    return [
+        {
+            "load_id": row.load_id,
+            "name": row.name
+        }
+
+        for row in loads_data
+    ]
+
+
+@app.post("dashboard_functions/graph")
+async def get_load_samples(period: str, load_id: int, db: AsyncSession = Depends(get_db)):
+    if period == "Daily":
+        query = text("""
+            SELECT 
+                DATE_TRUNC('minute', timestamp) AS time, 
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 day'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "Weekly":
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '7 days'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "Monthly":
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 month'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "6 Months":
+        query = text("""
+        SELECT
+            DATE_TRUNC('hour', timestamp) AS time,
+            AVG(power) AS power
+        FROM historic_grid_data
+        WHERE load_id = :load_id
+        AND timestamp >= NOW() - INTERVAL '6 months'
+        GROUP BY time
+        ORDER BY time;
+        """)
+
+    else:
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 year'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    result = await db.execute(
+        query,
+        {
+            "load_id": load_id
+        }
+    )
+
+    data = result.all()
+
+    return [
+        {
+            "time": row.time,
+            "power": row.power
+        }
+
+        for row in data
+    ]
