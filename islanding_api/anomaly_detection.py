@@ -26,6 +26,14 @@ def process_json(data):
         if ratings is None:
             continue
 
+        # Skip a load with metadata but no trained model yet - real before
+        # the first retrain has ever run (see NEXT_STEPS.md), and possible
+        # any time a new load is added to node_data before its first model
+        # exists. Previously this KeyError'd inside anomaly_detection()
+        # below and 500'd the entire request over one not-yet-trained load.
+        if load_id not in load_data.models:
+            continue
+
         power = voltage * current
         voltage_deviation = voltage - ratings["rated_voltage"]
         current_deviation = current - ratings["rated_current"]

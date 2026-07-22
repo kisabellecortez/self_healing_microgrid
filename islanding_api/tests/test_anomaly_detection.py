@@ -130,6 +130,23 @@ def test_system_score_calc_empty_returns_none():
     assert system_score_calc({}) is None
 
 
+def test_process_json_skips_load_with_metadata_but_no_trained_model_yet(monkeypatch):
+    # node_data has a row for load_id 1, but no isolation_forest_models/load_1.joblib
+    # has ever been trained yet (real before the first successful retrain -
+    # found via live testing: this previously KeyError'd inside
+    # anomaly_detection() and 500'd the entire /api/islanding request).
+    _install(monkeypatch, {}, {1: {"rated_voltage": 12.0, "rated_current": 0.3, "critical": True}})
+
+    data = {
+        "weather": {"temperature": 20, "humidity": 50, "rainfall": 0, "windspeed": 5},
+        "loads": [{"load_id": 1, "voltage": 12.0, "current": 0.3, "power": 3.6, "state": 1}],
+    }
+    system_score, scores_predictions = process_json(data)
+
+    assert system_score is None
+    assert scores_predictions == {}
+
+
 def test_process_json_skips_unknown_load_id_instead_of_keyerror(monkeypatch):
     # load_id 99 has no load_metadata entry - previously `ratings =
     # load_data.load_metadata[load_id]` raised KeyError here and crashed the

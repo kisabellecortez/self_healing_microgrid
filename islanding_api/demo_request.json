@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-07-17T14:30:00Z",
+  "weather": {
+    "temperature": 31.2,
+    "humidity": 72,
+    "rainfall": 4.5,
+    "windspeed": 38.0
+  },
+  "loads": [
+    {
+      "load_id": 1,
+      "voltage": 11.4,
+      "current": 0.34,
+      "power": 3.876,
+      "state": 1
+    },
+    {
+      "load_id": 2,
+      "voltage": 12.0,
+      "current": 0.92,
+      "power": 11.04,
+      "state": 1
+    },
+    {
+      "load_id": 3,
+      "voltage": 11.8,
+      "current": 0.21,
+      "power": 2.478,
+      "state": 1
+    },
+    {
+      "load_id": 4,
+      "voltage": 0.0,
+      "current": 0.0,
+      "power": 0.0,
+      "state": 0
+    },
+    {
+      "load_id": 5,
+      "voltage": 12.1,
+      "current": 0.19,
+      "power": 2.299,
+      "state": 1
+    }
+  ]
+}
