@@ -11,7 +11,6 @@ type Props = {
 };
 
 export default function PowerGraph({ data }: Props) {
-
   if (!data || data.length === 0) {
     return (
       <View style={styles.empty}>
@@ -42,7 +41,6 @@ export default function PowerGraph({ data }: Props) {
     };
   });
 
-
   return (
     <View style={[styles.graph, {width, height}]}>
 
@@ -63,7 +61,6 @@ export default function PowerGraph({ data }: Props) {
 
         const angle = Math.atan2(dy, dx) * 180 / Math.PI;
 
-
         return (
           <View
             key={index}
@@ -83,8 +80,7 @@ export default function PowerGraph({ data }: Props) {
           />
         );
       })}
-
-
+      
       {points.map((point,index)=>(
         <View
           key={index}
@@ -97,26 +93,21 @@ export default function PowerGraph({ data }: Props) {
           ]}
         />
       ))}
-
     </View>
   );
 }
 
-
 const styles = StyleSheet.create({
-
   graph:{
     backgroundColor:"#F9FAFB",
     overflow:"hidden",
   },
-
   line:{
     height:2,
     backgroundColor:"#2563EB",
     position:"absolute",
     transformOrigin:"left center"
   },
-
   dot:{
     width:6,
     height:6,
@@ -124,11 +115,9 @@ const styles = StyleSheet.create({
     backgroundColor:"#2563EB",
     position:"absolute"
   },
-
   empty:{
     height:180,
     justifyContent:"center",
     alignItems:"center"
   }
-
 });

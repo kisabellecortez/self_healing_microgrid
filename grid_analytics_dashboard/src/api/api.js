@@ -5,9 +5,9 @@ export async function getCurrentStatus(){
         `${API_URL}/dashboard_functions/status`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch status.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch status.")
+    }
 
     return await response.json()
 }
@@ -17,9 +17,9 @@ export async function getCurrentPower(){
         `${API_URL}/dashboard_functions/power`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch power.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch power.")
+    }
     
     return await response.json()
 }
@@ -29,9 +29,9 @@ export async function getCurrentEnergy(){
         `${API_URL}/dashboard_functions/energy`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch energy.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch energy.")
+    }
 
     return await response.json()
 }
@@ -41,9 +41,9 @@ export async function getWeather(){
         `${API_URL}/api/weather`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch weather features.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch weather features.")
+    }
 
     return await response.json()
 }
@@ -53,9 +53,9 @@ export async function getLoadsData(){
         `${API_URL}/dashboard_functions/loads_data`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch load data.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch load data.")
+    }
 
     return await response.json()
 }
@@ -65,9 +65,9 @@ export async function getLoadsMetaData(){
         `${API_URL}/dashboard_functions/loads_metadata`
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch load data.")
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch load data.")
+    }
 
     return await response.json()
 }
@@ -80,9 +80,9 @@ export async function getLoadPower(load_id, period){
         }
     );
 
-    // if(!response.ok){
-    //     throw new Error("Failed to fetch periodic load power.");
-    // }
+    if(!response.ok){
+        throw new Error("Failed to fetch periodic load power.");
+    }
 
     return await response.json();
 }
