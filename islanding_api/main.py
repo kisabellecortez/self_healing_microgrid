@@ -15,6 +15,7 @@ from database import AsyncSessionLocal, get_db
 from decision_layer import build_load_signals, determine_action, log_decision, time_since_islanding_started
 from models import AnomalyScore, HistoricGridData
 import requests
+import os
 
 app = FastAPI()
 
@@ -94,7 +95,6 @@ class SensorPayload(BaseModel):
     weather: WeatherPayload
     loads: list[LoadPayload]
 
-OPENWEATHER_API_KEY = "REMOVED_SECRET"
 LAT = 43.47061
 LON = -80.54132
 
@@ -104,7 +104,7 @@ def get_weather():
         "https://api.openweathermap.org/data/2.5/weather"
         f"?lat={LAT}"
         f"&lon={LON}"
-        f"&appid={OPENWEATHER_API_KEY}"
+        f"&appid={os.getenv("OPENWEATHER_API_KEY")}"
         "&units=metric"
     )
 
