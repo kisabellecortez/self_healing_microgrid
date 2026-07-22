@@ -1,22 +1,35 @@
-import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
-import { Platform, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { Platform, ScrollView, StyleSheet, View, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ExternalLink } from '@/components/external-link';
-import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Collapsible } from '@/components/ui/collapsible';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
+import { TouchableOpacity } from 'react-native';
+import React, { useState, useEffect } from 'react';
+
+import { getLoadsMetaData, getLoadPower } from "../api/api.js";
+import PowerGraph from "@/components/PowerGraph";
+
+type Load = {
+  load_id: number;
+  name: string;
+};
+
+type PowerSample = {
+  time: string;
+  power: number;
+};
+
 export default function TabTwoScreen() {
   const safeAreaInsets = useSafeAreaInsets();
+
   const insets = {
     ...safeAreaInsets,
     bottom: safeAreaInsets.bottom + BottomTabInset + Spacing.three,
   };
+
   const theme = useTheme();
 
   const contentPlatformStyle = Platform.select({
@@ -32,94 +45,99 @@ export default function TabTwoScreen() {
     },
   });
 
+  const [timeRange, setTimeRange] = useState("Day");
+  const [loadMetadata, setLoadMetadata] = useState<Load[]>([]);
+  const [loadGraphs, setLoadGraphs] = useState<Record<number, PowerSample[]>>({});
+
+  useEffect(() => {
+    async function fetchData() {
+      const result = await getLoadsMetaData();
+      setLoadMetadata(result);
+    }
+
+    fetchData();
+  }, []);
+
+  useEffect(() => {
+    async function fetchGraphData() {
+      for (const load of loadMetadata) {
+        const result = await getLoadPower(
+          load.load_id,
+          timeRange
+        );
+
+        setLoadGraphs(prev => ({
+          ...prev,
+          [load.load_id]: result
+        }));
+      }
+    }
+
+    if (loadMetadata.length === 0) {
+      return;
+    }
+
+    fetchGraphData();
+
+    const interval = setInterval(() => {
+      fetchGraphData();
+    }, 60000);
+
+    return () => clearInterval(interval);
+
+  }, [timeRange, loadMetadata]);
+
   return (
     <ScrollView
       style={[styles.scrollView, { backgroundColor: theme.background }]}
       contentInset={insets}
-      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
+      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}
+    >
       <ThemedView style={styles.container}>
-        <ThemedView style={styles.titleContainer}>
-          <ThemedText type="subtitle">Explore</ThemedText>
-          <ThemedText style={styles.centerText} themeColor="textSecondary">
-            This starter app includes example{'\n'}code to help you get started.
-          </ThemedText>
 
-          <ExternalLink href="https://docs.expo.dev" asChild>
-            <Pressable style={({ pressed }) => pressed && styles.pressed}>
-              <ThemedView type="backgroundElement" style={styles.linkButton}>
-                <ThemedText type="link">Expo documentation</ThemedText>
-                <SymbolView
-                  tintColor={theme.text}
-                  name={{ ios: 'arrow.up.right.square', android: 'link', web: 'link' }}
-                  size={12}
+        <View style={styles.segmentContainer}>
+          {["Day", "Week", "Month", "6 Months", "Year"].map((range) => (
+            <TouchableOpacity
+              key={range}
+              onPress={() => setTimeRange(range)}
+              style={[
+                styles.segment,
+                timeRange === range && styles.selectedSegment
+              ]}
+            >
+              <Text
+                style={[
+                  styles.segmentText,
+                  timeRange === range && styles.selectedText
+                ]}
+              >
+                {range}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.loadsContainer}>
+          {loadMetadata.map((load) => (
+            <View
+              key={load.load_id}
+              style={styles.loadCard}
+            >
+              <Text style={styles.loadTitle}>
+                {load.name}
+              </Text>
+
+              <View style={styles.graphContainer}>
+                <PowerGraph 
+                  data={loadGraphs[load.load_id] ?? []}
                 />
-              </ThemedView>
-            </Pressable>
-          </ExternalLink>
-        </ThemedView>
+              </View>
+            </View>
+          ))}
+        </View>
 
-        <ThemedView style={styles.sectionsWrapper}>
-          <Collapsible title="File-based routing">
-            <ThemedText type="small">
-              This app has two screens: <ThemedText type="code">src/app/index.tsx</ThemedText> and{' '}
-              <ThemedText type="code">src/app/explore.tsx</ThemedText>
-            </ThemedText>
-            <ThemedText type="small">
-              The layout file in <ThemedText type="code">src/app/_layout.tsx</ThemedText> sets up
-              the tab navigator.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/router/introduction">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
-
-          <Collapsible title="Android, iOS, and web support">
-            <ThemedView type="backgroundElement" style={styles.collapsibleContent}>
-              <ThemedText type="small">
-                You can open this project on Android, iOS, and the web. To open the web version,
-                press <ThemedText type="smallBold">w</ThemedText> in the terminal running this
-                project.
-              </ThemedText>
-              <Image
-                source={require('@/assets/images/tutorial-web.png')}
-                style={styles.imageTutorial}
-              />
-            </ThemedView>
-          </Collapsible>
-
-          <Collapsible title="Images">
-            <ThemedText type="small">
-              For static images, you can use the <ThemedText type="code">@2x</ThemedText> and{' '}
-              <ThemedText type="code">@3x</ThemedText> suffixes to provide files for different
-              screen densities.
-            </ThemedText>
-            <Image source={require('@/assets/images/react-logo.png')} style={styles.imageReact} />
-            <ExternalLink href="https://reactnative.dev/docs/images">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
-
-          <Collapsible title="Light and dark mode components">
-            <ThemedText type="small">
-              This template has light and dark mode support. The{' '}
-              <ThemedText type="code">useColorScheme()</ThemedText> hook lets you inspect what the
-              user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
-
-          <Collapsible title="Animations">
-            <ThemedText type="small">
-              This template includes an example of an animated component. The{' '}
-              <ThemedText type="code">src/components/ui/collapsible.tsx</ThemedText> component uses
-              the powerful <ThemedText type="code">react-native-reanimated</ThemedText> library to
-              animate opening this hint.
-            </ThemedText>
-          </Collapsible>
-        </ThemedView>
         {Platform.OS === 'web' && <WebBadge />}
+
       </ThemedView>
     </ScrollView>
   );
@@ -137,44 +155,73 @@ const styles = StyleSheet.create({
     maxWidth: MaxContentWidth,
     flexGrow: 1,
   },
-  titleContainer: {
-    gap: Spacing.three,
-    alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.six,
+  segmentContainer: {
+    flexDirection: "row",
+    backgroundColor: "#E5E7EB",
+    borderRadius: 20,
+    padding: 4,
+    width: "90%",
+    alignSelf: "center",
+    marginTop: 20
   },
-  centerText: {
-    textAlign: 'center',
+  segment: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderRadius: 16,
   },
-  pressed: {
-    opacity: 0.7,
+  selectedSegment: {
+    backgroundColor: "#FFFFFF",
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 2
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 3,
   },
-  linkButton: {
-    flexDirection: 'row',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.five,
-    justifyContent: 'center',
-    gap: Spacing.one,
-    alignItems: 'center',
+  segmentText: {
+    fontSize: 14,
+    color: "#6B7280",
   },
-  sectionsWrapper: {
-    gap: Spacing.five,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
+  selectedText: {
+    color: "#111827",
+    fontWeight: "600",
   },
-  collapsibleContent: {
-    alignItems: 'center',
+  loadsContainer: {
+    width: "100%",
+    alignItems: "center",
+    gap: 20,
+    paddingVertical: 20,
   },
-  imageTutorial: {
-    width: '100%',
-    aspectRatio: 296 / 171,
-    borderRadius: Spacing.three,
-    marginTop: Spacing.two,
+  loadCard: {
+    backgroundColor: "#FFFFFF",
+    width: "90%",
+    minHeight: 300,
+    padding: 20,
+    borderRadius: 15,
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 3
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 5,
+    elevation: 5,
   },
-  imageReact: {
-    width: 100,
-    height: 100,
-    alignSelf: 'center',
+  loadTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#1F2937",
+    marginBottom: 15,
+  },
+  graphContainer: {
+    width: "100%",
+    height: 220,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 10,
+    backgroundColor: "#F9FAFB",
   },
 });

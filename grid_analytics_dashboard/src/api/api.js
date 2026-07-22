@@ -59,3 +59,30 @@ export async function getLoadsData(){
 
     return await response.json()
 }
+
+export async function getLoadsMetaData(){
+    const response = await fetch(
+        `${API_URL}/dashboard_functions/loads_metadata`
+    );
+
+    // if(!response.ok){
+    //     throw new Error("Failed to fetch load data.")
+    // }
+
+    return await response.json()
+}
+
+export async function getLoadPower(load_id, period){
+    const response = await fetch(
+        `${API_URL}/dashboard_functions/graph?load_id=${load_id}&period=${period}`,
+        {
+            method: "POST"
+        }
+    );
+
+    // if(!response.ok){
+    //     throw new Error("Failed to fetch periodic load power.");
+    // }
+
+    return await response.json();
+}

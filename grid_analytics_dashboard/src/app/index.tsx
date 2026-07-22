@@ -125,7 +125,7 @@ export default function HomeScreen() {
             styles.cardContainer,
             {
               flexDirection: isLargeScreen ? "row" : "column",
-              marginTop: 100
+              marginTop: 75
             }
           ]}
         >
@@ -403,5 +403,21 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginBottom: 20,
     color: "#1F2937",
+  },
+  loadCard: {
+    backgroundColor: "#FFFFFF",
+    width: "30%",
+    minWidth: 280,
+    padding: 20,
+    borderRadius: 15,
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 3
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 5,
+    elevation: 5,
+    marginVertical: 10,
   },
 });

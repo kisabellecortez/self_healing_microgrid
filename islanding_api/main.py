@@ -295,6 +295,7 @@ async def get_current_energy(db: AsyncSession = Depends(get_db)):
         "current_energy": total_energy
     }
 
+
 @app.post("dashboard_functions/loads_data")
 async def get_loads_data(db: AsyncSession = Depends(get_db)):
     query = text("""
@@ -328,7 +329,7 @@ async def get_loads_data(db: AsyncSession = Depends(get_db)):
     loads_json = [
         {
             "name": row.name,
-            "connected": row.connected
+            "connected": row.connected,
             "power": row.power
         }
 
@@ -336,3 +337,105 @@ async def get_loads_data(db: AsyncSession = Depends(get_db)):
     ]
 
     return loads_json
+
+
+@app.post("dashboard_functions/loads_metadata")
+async def get_loads_metadata(db: AsyncSession = Depends(get_db)):
+    query = text("""
+        SELECT load_id, name
+        FROM load_data;
+    """)
+
+    result = await db.execute(query)
+
+    loads_data = result.all()
+
+    return [
+        {
+            "load_id": row.load_id,
+            "name": row.name
+        }
+
+        for row in loads_data
+    ]
+
+
+@app.post("dashboard_functions/graph")
+async def get_load_samples(period: str, load_id: int, db: AsyncSession = Depends(get_db)):
+    if period == "Daily":
+        query = text("""
+            SELECT 
+                DATE_TRUNC('minute', timestamp) AS time, 
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 day'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "Weekly":
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '7 days'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "Monthly":
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 month'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    elif period == "6 Months":
+        query = text("""
+        SELECT
+            DATE_TRUNC('hour', timestamp) AS time,
+            AVG(power) AS power
+        FROM historic_grid_data
+        WHERE load_id = :load_id
+        AND timestamp >= NOW() - INTERVAL '6 months'
+        GROUP BY time
+        ORDER BY time;
+        """)
+
+    else:
+        query = text("""
+            SELECT
+                DATE_TRUNC('hour', timestamp) AS time,
+                AVG(power) AS power
+            FROM historic_grid_data
+            WHERE load_id = :load_id
+            AND timestamp >= NOW() - INTERVAL '1 year'
+            GROUP BY time
+            ORDER BY time;
+        """)
+
+    result = await db.execute(
+        query,
+        {
+            "load_id": load_id
+        }
+    )
+
+    data = result.all()
+
+    return [
+        {
+            "time": row.time,
+            "power": row.power
+        }
+
+        for row in data
+    ]
