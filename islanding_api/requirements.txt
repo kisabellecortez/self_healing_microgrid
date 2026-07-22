@@ -8,6 +8,7 @@ joblib
 pandas
 apscheduler
 pydantic
+requests  # used by demo_replay.py to POST scenarios at the live API
 
 # testing
 pytest
